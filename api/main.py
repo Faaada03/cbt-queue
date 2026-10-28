@@ -9,7 +9,7 @@ celery_app = Celery("tasks", broker=os.environ["CELERY_BROKER_URL"])
 def cek():
     return {"status": "ok"}
 
-@app.post("/submit")
+@app.post("/submit", status_code=202)
 def submit(data: dict):
     celery_app.send_task("tasks.nilai_jawaban", args=[data])
     return {"status": "diterima"}

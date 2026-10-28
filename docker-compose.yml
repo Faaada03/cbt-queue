@@ -71,7 +71,7 @@ networks:
     internal: true
     ipam:
       config:
-        - subnet: 172.21.0.0/24
+        - subnet: 172.27.0.0/24
 
 volumes:
   rabbitmq-data:

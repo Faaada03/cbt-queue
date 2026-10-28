@@ -19,7 +19,7 @@ Diagram ada di folder `docs/`.
 
 ## Jaringan
 - frontend-net (172.20.0.0/24): jalur masuk dari luar, hanya api
-- backend-net (172.21.0.0/24, internal): api, rabbitmq, dan worker
+- backend-net (172.27.0.0/24, internal): api, rabbitmq, dan worker
 
 ## Cara menjalankan
 ```bash
