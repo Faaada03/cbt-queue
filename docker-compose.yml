@@ -1,112 +1,66 @@
-name: cbt-queue
-
 services:
-  nginx1:
+  # 1. NGINX GATEWAY (Pintu masuk port 8000 & pengatur Failover otomatis)
+  gateway:
     image: nginx:alpine
+    container_name: cbt_gateway
+    ports:
+      - "8000:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    ports:
-      - "8002:80"
     depends_on:
-      - api
-    networks:
-      - frontend-net
-      - backend-net
-    deploy:
-      resources:
-        limits:
-          cpus: "0.25"
-          memory: 256M
-    restart: unless-stopped
+      - fastapi_primary
+      - fastapi_backup
+    restart: always
 
-  nginx2:
-    image: nginx:alpine
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    ports:
-      - "8001:80"
-    depends_on:
-      - api
-    networks:
-      - frontend-net
-      - backend-net
-    deploy:
-      resources:
-        limits:
-          cpus: "0.25"
-          memory: 256M
-    restart: unless-stopped
-
-  api:
+  # 2. FASTAPI CONTAINER UTAMA (Target yang akan di-kill saat live demo)
+  fastapi_primary:
     build: ./api
+    container_name: cbt_fastapi_primary
     environment:
-      CELERY_BROKER_URL: amqp://${RABBIT_USER}:${RABBIT_PASS}@rabbitmq:5672//
+      - NODE_NAME=FASTAPI_PRIMARY (UTAMA)
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
     depends_on:
       rabbitmq:
         condition: service_healthy
-    networks:
-      - backend-net
-    deploy:
-      replicas: 2
-      resources:
-        limits:
-          cpus: "0.25"
-          memory: 256M
-    restart: unless-stopped
 
-  rabbitmq:
-    image: rabbitmq:3.13-management
-    hostname: rabbitmq
+  # 3. FASTAPI CONTAINER CADANGAN (Otomatis mengambil alih saat Primary mati)
+  fastapi_backup:
+    build: ./api
+    container_name: cbt_fastapi_backup
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBIT_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS}
-    volumes:
-      - rabbitmq-data:/var/lib/rabbitmq
+      - NODE_NAME=FASTAPI_BACKUP (CADANGAN)
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: always
+
+  # 4. RABBITMQ MESSAGE BROKER
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: cbt_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 30s
-      timeout: 30s
-      retries: 10
-      start_period: 60s
-    networks:
-      - backend-net
-    deploy:
-      resources:
-        limits:
-          cpus: "0.50"
-          memory: 512M
-    restart: unless-stopped
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
 
-  worker:
+  # 5. PYTHON CELERY WORKER (Menggunakan Dockerfile di dalam folder ./worker)
+  celery_worker:
     build: ./worker
-    command: celery -A tasks worker --loglevel=info --concurrency=1
     environment:
-      CELERY_BROKER_URL: amqp://${RABBIT_USER}:${RABBIT_PASS}@rabbitmq:5672//
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
     depends_on:
       rabbitmq:
         condition: service_healthy
-    networks:
-      - backend-net
-    deploy:
-      replicas: 2
-      resources:
-        limits:
-          cpus: "0.25"
-          memory: 256M
-    restart: unless-stopped
-
-networks:
-  frontend-net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/24
-  backend-net:
-    driver: bridge
-    internal: true
-    ipam:
-      config:
-        - subnet: 172.27.0.0/24
-
-volumes:
-  rabbitmq-data:
+    restart: always
