@@ -4,11 +4,11 @@ Pemrosesan jawaban ujian masif menggunakan FastAPI, RabbitMQ, dan Celery
 yang dijalankan dengan Docker Compose.
 
 ## Anggota
-- Rama
-- Reza
-- Fanisemz
-- Farid
-- Rangga
+- Muhammad ramadhan
+- Muhammad Reza Firmansyah
+- Muhammad Fanisam
+- Ananda Farid Firdaus
+- M Rangga Pratama Putra
 
 ## Arsitektur singkat
 - api (FastAPI): menerima kiriman jawaban, lalu mengirimnya ke antrean
