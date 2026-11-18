@@ -1,66 +1,239 @@
+name: cbt-queue
+
+x-limits: &limits
+  deploy:
+    resources:
+      limits:
+        cpus: '0.25'
+        memory: 256M
+
+x-infra-limits: &infra_limits
+  deploy:
+    resources:
+      limits:
+        cpus: '0.25'
+        memory: 512M
+
+x-api-common: &api_common
+  build: ./api
+  environment: &api_env
+    CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//
+    PG_HOST: postgres
+    PG_PASSWORD: ${PG_PASSWORD}
+    JWT_SECRET: ${JWT_SECRET}
+    DEMO_PASSWORD: ${DEMO_PASSWORD}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    rmq1:
+      condition: service_healthy
+  networks:
+    - backend-net
+  restart: unless-stopped
+  <<: *limits
+
 services:
-  # 1. NGINX GATEWAY (Pintu masuk port 8000 & pengatur Failover otomatis)
-  gateway:
+  # --- LAYER 1: DUAL NGINX GATEWAY (frontend-net + backend-net) ---
+  gateway1:
     image: nginx:alpine
-    container_name: cbt_gateway
-    ports:
-      - "8000:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - fastapi_primary
-      - fastapi_backup
-    restart: always
-
-  # 2. FASTAPI CONTAINER UTAMA (Target yang akan di-kill saat live demo)
-  fastapi_primary:
-    build: ./api
-    container_name: cbt_fastapi_primary
-    environment:
-      - NODE_NAME=FASTAPI_PRIMARY (UTAMA)
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-
-  # 3. FASTAPI CONTAINER CADANGAN (Otomatis mengambil alih saat Primary mati)
-  fastapi_backup:
-    build: ./api
-    container_name: cbt_fastapi_backup
-    environment:
-      - NODE_NAME=FASTAPI_BACKUP (CADANGAN)
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    restart: always
-
-  # 4. RABBITMQ MESSAGE BROKER
-  rabbitmq:
-    image: rabbitmq:3-management-alpine
-    container_name: cbt_rabbitmq
     ports:
-      - "5672:5672"
+      - "8000:80"
+    depends_on:
+      - api1
+      - api2
+      - api3
+    networks:
+      - frontend-net
+      - backend-net
+    restart: unless-stopped
+    <<: *limits
+
+  gateway2:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8001:80"
+    depends_on:
+      - api1
+      - api2
+      - api3
+    networks:
+      - frontend-net
+      - backend-net
+    restart: unless-stopped
+    <<: *limits
+
+  # --- LAYER 2: FASTAPI POOL ACTIVE-ACTIVE (3 Node) ---
+  api1:
+    <<: *api_common
+    environment:
+      <<: *api_env
+      NODE_NAME: api-1
+
+  api2:
+    <<: *api_common
+    environment:
+      <<: *api_env
+      NODE_NAME: api-2
+
+  api3:
+    <<: *api_common
+    environment:
+      <<: *api_env
+      NODE_NAME: api-3
+
+  # --- LAYER 3: POSTGRESQL DATABASE ---
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cbt
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: cbt
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cbt"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend-net
+    restart: unless-stopped
+    <<: *infra_limits
+
+  # --- LAYER 4: RABBITMQ 3-NODE CLUSTER (Quorum Queue) ---
+  rmq1:
+    image: rabbitmq:3.13-management-alpine
+    hostname: rmq1
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_COOKIE}
+      RABBITMQ_DEFAULT_USER: ${RMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RMQ_PASS}
+    volumes:
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - rmq1data:/var/lib/rabbitmq
+    ports:
       - "15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+    networks:
+      - backend-net
+      - frontend-net
     restart: always
+    <<: *infra_limits
 
-  # 5. PYTHON CELERY WORKER (Menggunakan Dockerfile di dalam folder ./worker)
+  rmq2:
+    image: rabbitmq:3.13-management-alpine
+    hostname: rmq2
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_COOKIE}
+      RABBITMQ_DEFAULT_USER: ${RMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RMQ_PASS}
+    volumes:
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - rmq2data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend-net
+    restart: always
+    <<: *infra_limits
+
+  rmq3:
+    image: rabbitmq:3.13-management-alpine
+    hostname: rmq3
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_COOKIE}
+      RABBITMQ_DEFAULT_USER: ${RMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RMQ_PASS}
+    volumes:
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - rmq3data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend-net
+    restart: always
+    <<: *infra_limits
+
+  # --- LAYER 5: CELERY WORKER POOL (Scale 2 s/d 6) ---
   celery_worker:
     build: ./worker
+    command: celery -A tasks worker --loglevel=info --concurrency=1
     environment:
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
-      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//
+      PG_HOST: postgres
+      PG_PASSWORD: ${PG_PASSWORD}
     depends_on:
-      rabbitmq:
+      postgres:
         condition: service_healthy
-    restart: always
+      rmq1:
+        condition: service_healthy
+    networks:
+      - backend-net
+    restart: unless-stopped
+    <<: *limits
+
+  # --- LAYER 6: MONITORING (Pertemuan 5 - cAdvisor, Prometheus, Grafana) ---
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - backend-net
+      - frontend-net
+    restart: unless-stopped
+    <<: *limits
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - backend-net
+      - frontend-net
+    restart: unless-stopped
+    <<: *limits
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    networks:
+      - backend-net
+      - frontend-net
+    restart: unless-stopped
+    <<: *limits
+
+networks:
+  frontend-net:
+    driver: bridge
+  backend-net:
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
+  rmq1data:
+  rmq2data:
+  rmq3data:
