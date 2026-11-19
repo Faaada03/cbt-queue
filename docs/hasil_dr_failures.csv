@@ -1,4 +1,1 @@
 Method,Name,Error,Occurrences,First Seen,Last Seen
-POST,/submit,HTTPError('503 Server Error: Service Unavailable for url: /submit'),285,2026-11-19T03:16:17Z,2026-11-19T03:17:09Z
-POST,/login,HTTPError('502 Server Error: Bad Gateway for url: /login'),732,2026-11-19T03:16:20Z,2026-11-19T03:17:19Z
-POST,/submit,HTTPError('502 Server Error: Bad Gateway for url: /submit'),2305,2026-11-19T03:16:19Z,2026-11-19T03:17:19Z

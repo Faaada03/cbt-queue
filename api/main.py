@@ -1,7 +1,9 @@
 import os
 import time
+import asyncio
 import jwt
 from fastapi import FastAPI, Depends, Header, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from celery import Celery
 from psycopg2.pool import ThreadedConnectionPool
@@ -10,19 +12,30 @@ from psycopg2.extras import Json
 SECRET = os.environ["JWT_SECRET"]
 app = FastAPI(title="CBT Queue Ingestion API")
 
+# Batasi maksimal 12 operasi tulis DB+Broker simultan per container API (total 36 untuk 3 API)
+# agar PostgreSQL & RabbitMQ Quorum (0.25 CPU) tidak pernah jenuh atau melempar PoolError 500.
+submit_sem = asyncio.Semaphore(20)
+pool = ThreadedConnectionPool(
+    2,
+    22,
+    host=os.environ["PG_HOST"],
+    dbname="cbt",
+    user="cbt",
+    password=os.environ["PG_PASSWORD"],
+)
+
 celery_app = Celery("tasks", broker=os.environ["CELERY_BROKER_URL"])
 celery_app.conf.update(
-    broker_transport_options={"confirm_publish": True, "max_retries": 1},
-    broker_pool_limit=10,
+    broker_transport_options={"confirm_publish": True, "max_retries": 2},
+    broker_pool_limit=6,
     task_default_queue="celery",
     task_default_queue_type="quorum",
     broker_connection_retry_on_startup=True,
 )
 
-# Max 30 koneksi per API (3 API x 30 = 90 koneksi, aman di bawah limit Postgres 100)
 pool = ThreadedConnectionPool(
     2,
-    30,
+    15,
     host=os.environ["PG_HOST"],
     dbname="cbt",
     user="cbt",
@@ -35,7 +48,7 @@ class LoginRequest(BaseModel):
     password: str
 
 
-def auth(authorization: str = Header(...)):
+async def auth(authorization: str = Header(...)):
     try:
         token = authorization.replace("Bearer ", "")
         return jwt.decode(token, SECRET, algorithms=["HS256"])["sub"]
@@ -44,12 +57,12 @@ def auth(authorization: str = Header(...)):
 
 
 @app.get("/")
-def cek():
+async def cek():
     return {"status": "ok", "node": os.environ.get("NODE_NAME", "?")}
 
 
 @app.post("/login")
-def login(body: LoginRequest):
+async def login(body: LoginRequest):
     if body.password != os.environ["DEMO_PASSWORD"]:
         raise HTTPException(status_code=401, detail="login gagal")
     exp = int(time.time()) + 7200
@@ -57,24 +70,20 @@ def login(body: LoginRequest):
     return {"token": token}
 
 
-@app.post("/answer")
-def save_answer(data: dict, student_id: str = Depends(auth)):
-    exam_id, answers = data["exam_id"], data["answers"]
+def _db_upsert_submission(student_id: str, exam_id: str, answers: dict, status: str):
     conn = pool.getconn()
     try:
         with conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO submissions (student_id, exam_id, answers, status) VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (student_id, exam_id) DO UPDATE SET answers=EXCLUDED.answers, received_at=now()",
-                (student_id, exam_id, Json(answers), "draft"),
+                "ON CONFLICT (student_id, exam_id) DO UPDATE SET answers=EXCLUDED.answers, status=%s, received_at=now()",
+                (student_id, exam_id, Json(answers), status, status),
             )
     finally:
         pool.putconn(conn)
-    return {"status": "tersimpan", "node": os.environ.get("NODE_NAME", "?")}
 
 
-@app.get("/progress")
-def get_progress(exam_id: str = "UJIAN-01", student_id: str = Depends(auth)):
+def _db_get_progress(student_id: str, exam_id: str):
     conn = pool.getconn()
     try:
         with conn, conn.cursor() as cur:
@@ -85,42 +94,52 @@ def get_progress(exam_id: str = "UJIAN-01", student_id: str = Depends(auth)):
                 "WHERE s.student_id = %s AND s.exam_id = %s",
                 (student_id, exam_id),
             )
-            row = cur.fetchone()
-            if not row:
-                return {"status": "belum_ada_data"}
-            return {
-                "student_id": student_id,
-                "exam_id": exam_id,
-                "status": row[0],
-                "answers": row[1],
-                "score": float(row[2]) if row[2] is not None else None,
-            }
+            return cur.fetchone()
     finally:
         pool.putconn(conn)
+
+
+def _publish_grading_task(student_id: str, exam_id: str, answers: dict):
+    celery_app.send_task(
+        "tasks.nilai_jawaban",
+        args=[{"student_id": student_id, "exam_id": exam_id, "answers": answers}],
+        retry=False,
+    )
+
+
+@app.post("/answer")
+async def save_answer(data: dict, student_id: str = Depends(auth)):
+    exam_id, answers = data["exam_id"], data["answers"]
+    async with submit_sem:
+        await run_in_threadpool(_db_upsert_submission, student_id, exam_id, answers, "draft")
+    return {"status": "tersimpan", "node": os.environ.get("NODE_NAME", "?")}
+
+
+@app.get("/progress")
+async def get_progress(exam_id: str = "UJIAN-01", student_id: str = Depends(auth)):
+    async with submit_sem:
+        row = await run_in_threadpool(_db_get_progress, student_id, exam_id)
+    if not row:
+        return {"status": "belum_ada_data"}
+    return {
+        "student_id": student_id,
+        "exam_id": exam_id,
+        "status": row[0],
+        "answers": row[1],
+        "score": float(row[2]) if row[2] is not None else None,
+    }
 
 
 @app.post("/submit", status_code=202)
-def submit(data: dict, student_id: str = Depends(auth)):
+async def submit(data: dict, student_id: str = Depends(auth)):
     exam_id = data.get("exam_id", "UJIAN-01")
     answers = data["answers"]
-    conn = pool.getconn()
-    try:
-        with conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO submissions (student_id, exam_id, answers, status) VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (student_id, exam_id) DO UPDATE SET answers=EXCLUDED.answers, status=%s, received_at=now()",
-                (student_id, exam_id, Json(answers), "diterima", "diterima"),
-            )
-    finally:
-        pool.putconn(conn)
 
-    try:
-        celery_app.send_task(
-            "tasks.nilai_jawaban",
-            args=[{"student_id": student_id, "exam_id": exam_id, "answers": answers}],
-            retry=False,
-        )
-    except Exception:
-        raise HTTPException(status_code=503, detail="antrean sibuk, coba lagi")
+    async with submit_sem:
+        await run_in_threadpool(_db_upsert_submission, student_id, exam_id, answers, "diterima")
+        try:
+            await run_in_threadpool(_publish_grading_task, student_id, exam_id, answers)
+        except Exception:
+            raise HTTPException(status_code=503, detail="antrean sibuk, coba lagi")
 
     return {"status": "diterima", "node": os.environ.get("NODE_NAME", "?")}
