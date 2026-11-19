@@ -12,17 +12,17 @@ app = FastAPI(title="CBT Queue Ingestion API")
 
 celery_app = Celery("tasks", broker=os.environ["CELERY_BROKER_URL"])
 celery_app.conf.update(
-    broker_transport_options={"confirm_publish": True},
+    broker_transport_options={"confirm_publish": True, "max_retries": 1},
     broker_pool_limit=10,
     task_default_queue="celery",
     task_default_queue_type="quorum",
     broker_connection_retry_on_startup=True,
 )
 
-# Perbesar maxconn dari 10 menjadi 25 agar tidak terjadi antrean koneksi DB
+# Max 30 koneksi per API (3 API x 30 = 90 koneksi, aman di bawah limit Postgres 100)
 pool = ThreadedConnectionPool(
-    1,
-    12,
+    2,
+    30,
     host=os.environ["PG_HOST"],
     dbname="cbt",
     user="cbt",
@@ -118,8 +118,9 @@ def submit(data: dict, student_id: str = Depends(auth)):
         celery_app.send_task(
             "tasks.nilai_jawaban",
             args=[{"student_id": student_id, "exam_id": exam_id, "answers": answers}],
+            retry=False,
         )
     except Exception:
-        raise HTTPException(status_code=503, detail="antrean tidak tersedia, coba lagi")
+        raise HTTPException(status_code=503, detail="antrean sibuk, coba lagi")
 
     return {"status": "diterima", "node": os.environ.get("NODE_NAME", "?")}
