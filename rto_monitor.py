@@ -1,5 +1,4 @@
 import time
-import random
 import requests
 
 GATEWAYS = ["http://localhost:8000", "http://localhost:8001"]
@@ -32,8 +31,6 @@ def main():
     gw_idx = 0
 
     while True:
-        sid_test = f"DR-{random.randint(100000, 999999)}"
-        # Login cepat atau gunakan token untuk kirim submit
         gw = GATEWAYS[gw_idx % len(GATEWAYS)]
         t0 = time.perf_counter()
         try:

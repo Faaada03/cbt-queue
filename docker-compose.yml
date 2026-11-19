@@ -27,6 +27,10 @@ x-api-common: &api_common
       condition: service_healthy
     rmq1:
       condition: service_healthy
+    rmq2:
+      condition: service_healthy
+    rmq3:
+      condition: service_healthy
   networks:
     - backend-net
   restart: unless-stopped
@@ -182,13 +186,19 @@ services:
         condition: service_healthy
       rmq1:
         condition: service_healthy
+      rmq2:
+        condition: service_healthy
+      rmq3:
+        condition: service_healthy
     networks:
       - backend-net
     restart: unless-stopped
     <<: *limits
 
-  # --- LAYER 6: MONITORING (Pertemuan 5 - cAdvisor, Prometheus, Grafana) ---
+  # --- LAYER 6: MONITORING (opsional, profile 'monitoring').
+  # Nyalakan: docker compose --profile monitoring up -d ---
   cadvisor:
+    profiles: ["monitoring"]
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     volumes:
       - /:/rootfs:ro
@@ -204,7 +214,8 @@ services:
     <<: *limits
 
   prometheus:
-    image: prom/prometheus:latest
+    profiles: ["monitoring"]
+    image: prom/prometheus:v2.53.0
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -216,7 +227,10 @@ services:
     <<: *limits
 
   grafana:
-    image: grafana/grafana:latest
+    profiles: ["monitoring"]
+    image: grafana/grafana:11.1.0
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
       - "3000:3000"
     networks:

@@ -1,8 +1,5 @@
 fastapi
 uvicorn
-celery
-fastapi
-uvicorn
 celery>=5.5
 psycopg2-binary
 PyJWT
