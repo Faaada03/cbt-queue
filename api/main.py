@@ -1,55 +1,33 @@
 import os
 import time
-import threading
-from contextlib import contextmanager
-
 import jwt
-import psycopg2
-from celery import Celery
 from fastapi import FastAPI, Depends, Header, HTTPException
-from psycopg2.extras import Json
-from psycopg2.pool import ThreadedConnectionPool
 from pydantic import BaseModel
+from celery import Celery
+from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.extras import Json
 
 SECRET = os.environ["JWT_SECRET"]
-NODE = os.environ.get("NODE_NAME", "?")
-DEFAULT_EXAM = "UJIAN-01"
-
 app = FastAPI(title="CBT Queue Ingestion API")
 
-# Publisher confirms + quorum queue (alur 5 pada diagram)
 celery_app = Celery("tasks", broker=os.environ["CELERY_BROKER_URL"])
 celery_app.conf.update(
     broker_transport_options={"confirm_publish": True},
+    broker_pool_limit=10,
     task_default_queue="celery",
     task_default_queue_type="quorum",
     broker_connection_retry_on_startup=True,
 )
 
-# Connection pool PostgreSQL (alur 4 pada diagram).
-# ThreadedConnectionPool melempar error jika habis, bukan menunggu.
-# Semaphore membuat request mengantre sehingga tidak gagal saat beban tinggi.
-POOL_MAX = 20
+# Perbesar maxconn dari 10 menjadi 25 agar tidak terjadi antrean koneksi DB
 pool = ThreadedConnectionPool(
-    2,
-    POOL_MAX,
+    1,
+    12,
     host=os.environ["PG_HOST"],
     dbname="cbt",
     user="cbt",
     password=os.environ["PG_PASSWORD"],
 )
-pool_sem = threading.BoundedSemaphore(POOL_MAX)
-
-
-@contextmanager
-def db():
-    pool_sem.acquire()
-    conn = pool.getconn()
-    try:
-        yield conn
-    finally:
-        pool.putconn(conn)
-        pool_sem.release()
 
 
 class LoginRequest(BaseModel):
@@ -57,14 +35,7 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class AnswerBody(BaseModel):
-    exam_id: str = DEFAULT_EXAM
-    answers: dict
-
-
-def auth(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="token tidak ada")
+def auth(authorization: str = Header(...)):
     try:
         token = authorization.replace("Bearer ", "")
         return jwt.decode(token, SECRET, algorithms=["HS256"])["sub"]
@@ -74,7 +45,7 @@ def auth(authorization: str = Header(None)):
 
 @app.get("/")
 def cek():
-    return {"status": "ok", "node": NODE}
+    return {"status": "ok", "node": os.environ.get("NODE_NAME", "?")}
 
 
 @app.post("/login")
@@ -87,31 +58,26 @@ def login(body: LoginRequest):
 
 
 @app.post("/answer")
-def save_answer(body: AnswerBody, student_id: str = Depends(auth)):
-    """Autosave jawaban sementara. Ditolak (409) jika sudah di-submit final."""
+def save_answer(data: dict, student_id: str = Depends(auth)):
+    exam_id, answers = data["exam_id"], data["answers"]
+    conn = pool.getconn()
     try:
-        with db() as conn, conn, conn.cursor() as cur:
+        with conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO submissions (student_id, exam_id, answers, status) "
-                "VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (student_id, exam_id) DO UPDATE "
-                "SET answers=EXCLUDED.answers, received_at=now() "
-                "WHERE submissions.status = 'draft'",
-                (student_id, body.exam_id, Json(body.answers), "draft"),
+                "INSERT INTO submissions (student_id, exam_id, answers, status) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (student_id, exam_id) DO UPDATE SET answers=EXCLUDED.answers, received_at=now()",
+                (student_id, exam_id, Json(answers), "draft"),
             )
-            saved = cur.rowcount == 1
-    except psycopg2.Error:
-        raise HTTPException(status_code=503, detail="database tidak tersedia, coba lagi")
-    if not saved:
-        raise HTTPException(status_code=409, detail="jawaban sudah di-submit final")
-    return {"status": "tersimpan", "node": NODE}
+    finally:
+        pool.putconn(conn)
+    return {"status": "tersimpan", "node": os.environ.get("NODE_NAME", "?")}
 
 
 @app.get("/progress")
-def get_progress(exam_id: str = DEFAULT_EXAM, student_id: str = Depends(auth)):
-    """Status jawaban dan nilai siswa."""
+def get_progress(exam_id: str = "UJIAN-01", student_id: str = Depends(auth)):
+    conn = pool.getconn()
     try:
-        with db() as conn, conn, conn.cursor() as cur:
+        with conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT s.status, s.answers, r.score "
                 "FROM submissions s LEFT JOIN results r "
@@ -120,43 +86,40 @@ def get_progress(exam_id: str = DEFAULT_EXAM, student_id: str = Depends(auth)):
                 (student_id, exam_id),
             )
             row = cur.fetchone()
-    except psycopg2.Error:
-        raise HTTPException(status_code=503, detail="database tidak tersedia, coba lagi")
-    if not row:
-        return {"status": "belum_ada_data"}
-    return {
-        "student_id": student_id,
-        "exam_id": exam_id,
-        "status": row[0],
-        "answers": row[1],
-        "score": float(row[2]) if row[2] is not None else None,
-    }
+            if not row:
+                return {"status": "belum_ada_data"}
+            return {
+                "student_id": student_id,
+                "exam_id": exam_id,
+                "status": row[0],
+                "answers": row[1],
+                "score": float(row[2]) if row[2] is not None else None,
+            }
+    finally:
+        pool.putconn(conn)
 
 
 @app.post("/submit", status_code=202)
-def submit(body: AnswerBody, student_id: str = Depends(auth)):
-    """Simpan jawaban final ke PostgreSQL, lalu publish task ke RabbitMQ.
-
-    Idempoten: kiriman ulang menimpa baris yang sama, aman untuk retry.
-    """
+def submit(data: dict, student_id: str = Depends(auth)):
+    exam_id = data.get("exam_id", "UJIAN-01")
+    answers = data["answers"]
+    conn = pool.getconn()
     try:
-        with db() as conn, conn, conn.cursor() as cur:
+        with conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO submissions (student_id, exam_id, answers, status) "
-                "VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (student_id, exam_id) DO UPDATE "
-                "SET answers=EXCLUDED.answers, status=EXCLUDED.status, received_at=now()",
-                (student_id, body.exam_id, Json(body.answers), "diterima"),
+                "INSERT INTO submissions (student_id, exam_id, answers, status) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (student_id, exam_id) DO UPDATE SET answers=EXCLUDED.answers, status=%s, received_at=now()",
+                (student_id, exam_id, Json(answers), "diterima", "diterima"),
             )
-    except psycopg2.Error:
-        raise HTTPException(status_code=503, detail="database tidak tersedia, coba lagi")
+    finally:
+        pool.putconn(conn)
 
     try:
         celery_app.send_task(
             "tasks.nilai_jawaban",
-            args=[{"student_id": student_id, "exam_id": body.exam_id, "answers": body.answers}],
+            args=[{"student_id": student_id, "exam_id": exam_id, "answers": answers}],
         )
     except Exception:
         raise HTTPException(status_code=503, detail="antrean tidak tersedia, coba lagi")
 
-    return {"status": "diterima", "node": NODE}
+    return {"status": "diterima", "node": os.environ.get("NODE_NAME", "?")}

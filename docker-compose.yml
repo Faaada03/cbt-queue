@@ -16,6 +16,7 @@ x-infra-limits: &infra_limits
 
 x-api-common: &api_common
   build: ./api
+  command: uvicorn main:app --host 0.0.0.0 --port 8000 --backlog 2048 --limit-concurrency 500
   environment: &api_env
     CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//
     PG_HOST: postgres
@@ -123,10 +124,11 @@ services:
     ports:
       - "15672:15672"
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5672 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 15
+      start_period: 120s
     networks:
       - backend-net
       - frontend-net
@@ -144,10 +146,11 @@ services:
       - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
       - rmq2data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5672 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 15
+      start_period: 120s
     networks:
       - backend-net
     restart: always
@@ -164,10 +167,11 @@ services:
       - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
       - rmq3data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5672 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 15
+      start_period: 120s
     networks:
       - backend-net
     restart: always

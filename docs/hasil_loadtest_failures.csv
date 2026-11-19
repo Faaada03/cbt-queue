@@ -1,0 +1,7 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,/login,HTTPError('503 Server Error: Service Unavailable for url: /login'),3,2026-11-19T02:54:08Z,2026-11-19T02:54:12Z
+POST,/submit,HTTPError('503 Server Error: Service Unavailable for url: /submit'),59,2026-11-19T02:54:07Z,2026-11-19T02:55:47Z
+POST,/login,HTTPError('502 Server Error: Bad Gateway for url: /login'),6187,2026-11-19T02:53:03Z,2026-11-19T02:56:02Z
+POST,/submit,HTTPError('504 Server Error: Gateway Time-out for url: /submit'),34,2026-11-19T02:54:22Z,2026-11-19T02:56:01Z
+POST,/submit,HTTPError('500 Server Error: Internal Server Error for url: /submit'),834,2026-11-19T02:53:33Z,2026-11-19T02:55:49Z
+POST,/submit,HTTPError('502 Server Error: Bad Gateway for url: /submit'),14390,2026-11-19T02:54:08Z,2026-11-19T02:56:02Z
