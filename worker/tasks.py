@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from psycopg2.extras import Json
 from celery import Celery
 
 app = Celery("tasks", broker=os.environ["CELERY_BROKER_URL"])
@@ -16,6 +17,7 @@ app.conf.update(
 def get_conn():
     return psycopg2.connect(
         host=os.environ["PG_HOST"],
+        port=int(os.environ.get("PG_PORT", "5432")),
         dbname="cbt",
         user="cbt",
         password=os.environ["PG_PASSWORD"],
@@ -28,17 +30,27 @@ def nilai_jawaban(data: dict):
     conn = get_conn()
     try:
         with conn, conn.cursor() as cur:
+            # 1. Simpan jawaban final siswa ke tabel submissions (UPSERT idempoten)
+            cur.execute(
+                "INSERT INTO submissions (student_id, exam_id, answers, status) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (student_id, exam_id) DO UPDATE SET answers=EXCLUDED.answers, status=%s, received_at=now()",
+                (sid, eid, Json(answers), "diterima", "diterima"),
+            )
+
+            # 2. Baca kunci jawaban dan hitung skor
             cur.execute("SELECT soal_no, jawaban FROM answer_keys WHERE exam_id=%s", (eid,))
             kunci = dict(cur.fetchall())
             benar = sum(1 for no, j in kunci.items() if answers.get(f"soal_{no}") == j)
             skor = 100.0 * benar / max(len(kunci), 1)
 
-            # Alur 8 Draw.io: Tulis hasil (UPSERT results)
+            # 3. Simpan hasil skor ke tabel results (UPSERT idempoten)
             cur.execute(
                 "INSERT INTO results (student_id, exam_id, score) VALUES (%s, %s, %s) "
                 "ON CONFLICT (student_id, exam_id) DO UPDATE SET score=EXCLUDED.score, graded_at=now()",
                 (sid, eid, skor),
             )
+
+            # 4. Tandai submission sudah selesai dinilai
             cur.execute(
                 "UPDATE submissions SET status=%s WHERE student_id=%s AND exam_id=%s",
                 ("selesai", sid, eid),

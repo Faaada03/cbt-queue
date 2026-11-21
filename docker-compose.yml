@@ -16,21 +16,18 @@ x-infra-limits: &infra_limits
 
 x-api-common: &api_common
   build: ./api
-  command: uvicorn main:app --host 0.0.0.0 --port 8000 --backlog 2048 --limit-concurrency 500
   environment: &api_env
     CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//
-    PG_HOST: postgres
+    PG_HOST: pgbouncer
     PG_PASSWORD: ${PG_PASSWORD}
     JWT_SECRET: ${JWT_SECRET}
     DEMO_PASSWORD: ${DEMO_PASSWORD}
   depends_on:
     postgres:
       condition: service_healthy
+    pgbouncer:
+      condition: service_started
     rmq1:
-      condition: service_healthy
-    rmq2:
-      condition: service_healthy
-    rmq3:
       condition: service_healthy
   networks:
     - backend-net
@@ -90,9 +87,10 @@ services:
       <<: *api_env
       NODE_NAME: api-3
 
-  # --- LAYER 3: POSTGRESQL DATABASE ---
+  # --- LAYER 3: POSTGRESQL DATABASE (MAKSIMAL 100 KONEKSI) ---
   postgres:
     image: postgres:16-alpine
+    command: postgres -c max_connections=100
     environment:
       POSTGRES_USER: cbt
       POSTGRES_PASSWORD: ${PG_PASSWORD}
@@ -110,6 +108,35 @@ services:
     restart: unless-stopped
     <<: *infra_limits
 
+  # --- LAYER 3B: PGBOUNCER CONNECTION POOLER (TAMPUNG 5.000 CLIENT -> 80 DB CONN) ---
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: cbt
+      DB_PASSWORD: ${PG_PASSWORD}
+      DB_NAME: cbt
+      LISTEN_PORT: 5432
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 5000
+      DEFAULT_POOL_SIZE: 80
+      RESERVE_POOL_SIZE: 10
+      AUTH_TYPE: scram-sha-256
+      ADMIN_USERS: cbt
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend-net
+    restart: unless-stopped
+    <<: *limits
+
   # --- LAYER 4: RABBITMQ 3-NODE CLUSTER (Quorum Queue) ---
   rmq1:
     image: rabbitmq:3.13-management-alpine
@@ -124,11 +151,10 @@ services:
     ports:
       - "15672:15672"
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 5672 || exit 1"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 15
-      start_period: 120s
+      retries: 10
     networks:
       - backend-net
       - frontend-net
@@ -146,11 +172,10 @@ services:
       - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
       - rmq2data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 5672 || exit 1"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 15
-      start_period: 120s
+      retries: 10
     networks:
       - backend-net
     restart: always
@@ -167,11 +192,10 @@ services:
       - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
       - rmq3data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 5672 || exit 1"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 15
-      start_period: 120s
+      retries: 10
     networks:
       - backend-net
     restart: always
@@ -183,26 +207,22 @@ services:
     command: celery -A tasks worker --loglevel=info --concurrency=1
     environment:
       CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//
-      PG_HOST: postgres
+      PG_HOST: pgbouncer
       PG_PASSWORD: ${PG_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
+      pgbouncer:
+        condition: service_started
       rmq1:
-        condition: service_healthy
-      rmq2:
-        condition: service_healthy
-      rmq3:
         condition: service_healthy
     networks:
       - backend-net
     restart: unless-stopped
     <<: *limits
 
-  # --- LAYER 6: MONITORING (opsional, profile 'monitoring').
-  # Nyalakan: docker compose --profile monitoring up -d ---
+  # --- LAYER 6: MONITORING ---
   cadvisor:
-    profiles: ["monitoring"]
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     volumes:
       - /:/rootfs:ro
@@ -218,8 +238,7 @@ services:
     <<: *limits
 
   prometheus:
-    profiles: ["monitoring"]
-    image: prom/prometheus:v2.53.0
+    image: prom/prometheus:latest
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -231,10 +250,7 @@ services:
     <<: *limits
 
   grafana:
-    profiles: ["monitoring"]
-    image: grafana/grafana:11.1.0
-    volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    image: grafana/grafana:latest
     ports:
       - "3000:3000"
     networks:
