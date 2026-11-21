@@ -1,11 +1,11 @@
-CREATE TABLE answer_keys (
+CREATE TABLE IF NOT EXISTS answer_keys (
   exam_id TEXT,
   soal_no INT,
   jawaban TEXT,
   PRIMARY KEY (exam_id, soal_no)
 );
 
-CREATE TABLE submissions (
+CREATE TABLE IF NOT EXISTS submissions (
   student_id TEXT,
   exam_id TEXT,
   answers JSONB NOT NULL,
@@ -14,7 +14,7 @@ CREATE TABLE submissions (
   PRIMARY KEY (student_id, exam_id)
 );
 
-CREATE TABLE results (
+CREATE TABLE IF NOT EXISTS results (
   student_id TEXT,
   exam_id TEXT,
   score NUMERIC(5,2),
@@ -27,4 +27,5 @@ INSERT INTO answer_keys VALUES
   ('UJIAN-01', 2, 'B'),
   ('UJIAN-01', 3, 'C'),
   ('UJIAN-01', 4, 'D'),
-  ('UJIAN-01', 5, 'A');
+  ('UJIAN-01', 5, 'A')
+ON CONFLICT (exam_id, soal_no) DO NOTHING;

@@ -1,0 +1,2 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,/login,CatchResponseError('Login gagal: HTTP 0'),73,2026-11-21T18:28:55Z,2026-11-21T18:29:04Z

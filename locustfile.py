@@ -1,59 +1,32 @@
 import random
-from locust import HttpUser, task, between
+from locust import FastHttpUser, between, task
 
 
-class SiswaCBT(HttpUser):
-    wait_time = between(1.0, 3.0)
+class SiswaCBT(FastHttpUser):
+    wait_time = between(0.5, 1.5)
+    connection_timeout = 10.0
+    network_timeout = 15.0
 
     def on_start(self):
-        self.sid = f"MHS-{random.randint(1, 10**7)}"
+        self.sid = f"MHS-{random.randint(1, 10**8)}"
         self.headers = {}
-        r = self.client.post(
+        with self.client.post(
             "/login",
             json={"student_id": self.sid, "password": "cbt123"},
             name="/login",
-        )
-        if r.status_code == 200:
-            self.headers = {"Authorization": "Bearer " + r.json()["token"]}
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 200:
+                self.headers = {"Authorization": "Bearer " + resp.json()["token"]}
+                resp.success()
+            else:
+                resp.failure(f"Login gagal: HTTP {resp.status_code}")
 
-    @task(2)
-    def save_draft_answer(self):
-        """Menguji jalur PgBouncer -> PostgreSQL (autosave draft)."""
+    @task
+    def submit_jawaban(self):
         if not self.headers:
             return
-        self.client.post(
-            "/answer",
-            headers=self.headers,
-            json={
-                "exam_id": "UJIAN-01",
-                "answers": {
-                    "soal_1": "A",
-                    "soal_2": "B",
-                    "soal_3": "C",
-                    "soal_4": "D",
-                    "soal_5": "A",
-                },
-            },
-            name="/answer",
-        )
-
-    @task(1)
-    def check_progress(self):
-        """Menguji pembacaan data lewat PgBouncer."""
-        if not self.headers:
-            return
-        self.client.get(
-            "/progress?exam_id=UJIAN-01",
-            headers=self.headers,
-            name="/progress",
-        )
-
-    @task(3)
-    def submit_final(self):
-        """Menguji jalur Pure Async -> RabbitMQ Quorum Queue -> Celery Worker -> PgBouncer."""
-        if not self.headers:
-            return
-        self.client.post(
+        with self.client.post(
             "/submit",
             headers=self.headers,
             json={
@@ -67,4 +40,9 @@ class SiswaCBT(HttpUser):
                 },
             },
             name="/submit",
-        )
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 202:
+                resp.success()
+            else:
+                resp.failure(f"Submit gagal: HTTP {resp.status_code}")

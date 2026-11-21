@@ -19,12 +19,11 @@ x-api-common: &api_common
   environment: &api_env
     CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//
     PG_HOST: pgbouncer
+    PG_PORT: "5432"
     PG_PASSWORD: ${PG_PASSWORD}
     JWT_SECRET: ${JWT_SECRET}
     DEMO_PASSWORD: ${DEMO_PASSWORD}
   depends_on:
-    postgres:
-      condition: service_healthy
     pgbouncer:
       condition: service_started
     rmq1:
@@ -35,7 +34,7 @@ x-api-common: &api_common
   <<: *limits
 
 services:
-  # --- LAYER 1: DUAL NGINX GATEWAY (frontend-net + backend-net) ---
+  # --- LAYER 1: DUAL NGINX GATEWAY ---
   gateway1:
     image: nginx:alpine
     volumes:
@@ -68,7 +67,7 @@ services:
     restart: unless-stopped
     <<: *limits
 
-  # --- LAYER 2: FASTAPI POOL ACTIVE-ACTIVE (3 Node) ---
+  # --- LAYER 2: FASTAPI POOL ACTIVE-ACTIVE (3 NODE) ---
   api1:
     <<: *api_common
     environment:
@@ -87,7 +86,7 @@ services:
       <<: *api_env
       NODE_NAME: api-3
 
-  # --- LAYER 3: POSTGRESQL DATABASE (MAKSIMAL 100 KONEKSI) ---
+  # --- LAYER 3: PGBOUNCER & POSTGRESQL (MAX 100 CONNECTIONS) ---
   postgres:
     image: postgres:16-alpine
     command: postgres -c max_connections=100
@@ -108,27 +107,19 @@ services:
     restart: unless-stopped
     <<: *infra_limits
 
-  # --- LAYER 3B: PGBOUNCER CONNECTION POOLER (TAMPUNG 5.000 CLIENT -> 80 DB CONN) ---
   pgbouncer:
     image: edoburu/pgbouncer:latest
     environment:
       DB_HOST: postgres
-      DB_PORT: 5432
+      DB_PORT: "5432"
       DB_USER: cbt
       DB_PASSWORD: ${PG_PASSWORD}
       DB_NAME: cbt
-      LISTEN_PORT: 5432
       POOL_MODE: transaction
       MAX_CLIENT_CONN: 5000
       DEFAULT_POOL_SIZE: 80
-      RESERVE_POOL_SIZE: 10
       AUTH_TYPE: scram-sha-256
       ADMIN_USERS: cbt
-      IGNORE_STARTUP_PARAMETERS: extra_float_digits
-    ulimits:
-      nofile:
-        soft: 16384
-        hard: 16384
     depends_on:
       postgres:
         condition: service_healthy
@@ -137,7 +128,7 @@ services:
     restart: unless-stopped
     <<: *limits
 
-  # --- LAYER 4: RABBITMQ 3-NODE CLUSTER (Quorum Queue) ---
+  # --- LAYER 4: RABBITMQ 3-NODE CLUSTER (QUORUM QUEUE) ---
   rmq1:
     image: rabbitmq:3.13-management-alpine
     hostname: rmq1
@@ -152,9 +143,10 @@ services:
       - "15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
+      interval: 15s
+      timeout: 20s
       retries: 10
+      start_period: 60s
     networks:
       - backend-net
       - frontend-net
@@ -173,9 +165,10 @@ services:
       - rmq2data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
+      interval: 15s
+      timeout: 20s
       retries: 10
+      start_period: 60s
     networks:
       - backend-net
     restart: always
@@ -193,25 +186,25 @@ services:
       - rmq3data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
+      interval: 15s
+      timeout: 20s
       retries: 10
+      start_period: 60s
     networks:
       - backend-net
     restart: always
     <<: *infra_limits
 
-  # --- LAYER 5: CELERY WORKER POOL (Scale 2 s/d 6) ---
+  # --- LAYER 5: CELERY WORKER POOL (SCALE 2 S/D 6) ---
   celery_worker:
     build: ./worker
     command: celery -A tasks worker --loglevel=info --concurrency=1
     environment:
       CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//
       PG_HOST: pgbouncer
+      PG_PORT: "5432"
       PG_PASSWORD: ${PG_PASSWORD}
     depends_on:
-      postgres:
-        condition: service_healthy
       pgbouncer:
         condition: service_started
       rmq1:
