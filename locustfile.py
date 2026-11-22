@@ -1,17 +1,20 @@
 import random
 from locust import FastHttpUser, between, task
 
+GATEWAYS = ["http://localhost:8000", "http://localhost:8001"]
+
 
 class SiswaCBT(FastHttpUser):
-    wait_time = between(0.5, 1.5)
+    wait_time = between(25, 40)  # ~100-200 RPS pada 1.000 VU
     connection_timeout = 10.0
     network_timeout = 15.0
 
     def on_start(self):
+        self.gw = random.choice(GATEWAYS)
         self.sid = f"MHS-{random.randint(1, 10**8)}"
         self.headers = {}
         with self.client.post(
-            "/login",
+            f"{self.gw}/login",
             json={"student_id": self.sid, "password": "cbt123"},
             name="/login",
             catch_response=True,
@@ -27,7 +30,7 @@ class SiswaCBT(FastHttpUser):
         if not self.headers:
             return
         with self.client.post(
-            "/submit",
+            f"{self.gw}/submit",
             headers=self.headers,
             json={
                 "exam_id": "UJIAN-01",

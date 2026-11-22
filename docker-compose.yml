@@ -11,7 +11,7 @@ x-infra-limits: &infra_limits
   deploy:
     resources:
       limits:
-        cpus: '0.25'
+        cpus: '0.75'
         memory: 512M
 
 x-api-common: &api_common
@@ -73,18 +73,21 @@ services:
     environment:
       <<: *api_env
       NODE_NAME: api-1
+      CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//
 
   api2:
     <<: *api_common
     environment:
       <<: *api_env
       NODE_NAME: api-2
+      CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//
 
   api3:
     <<: *api_common
     environment:
       <<: *api_env
       NODE_NAME: api-3
+      CELERY_BROKER_URL: amqp://${RMQ_USER}:${RMQ_PASS}@rmq3:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq1:5672//;amqp://${RMQ_USER}:${RMQ_PASS}@rmq2:5672//
 
   # --- LAYER 3: PGBOUNCER & POSTGRESQL (MAX 100 CONNECTIONS) ---
   postgres:
@@ -250,8 +253,11 @@ services:
       - backend-net
       - frontend-net
     restart: unless-stopped
-    <<: *limits
-
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 512M
 networks:
   frontend-net:
     driver: bridge
